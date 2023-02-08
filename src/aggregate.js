@@ -1,28 +1,33 @@
-import { id as keccak256 } from 'ethers/utils/hash';
 import invariant from 'invariant';
 import { strip0x, ethCall, encodeParameters, decodeParameters } from './helpers.js';
 import memoize from 'lodash/memoize';
+import { Interface, keccak256, toUtf8Bytes } from 'ethers/lib/utils';
 
 const INSIDE_EVERY_PARENTHESES = /\(.*?\)/g;
 const FIRST_CLOSING_PARENTHESES = /^[^)]*\)/;
 
 export function _makeMulticallData(calls) {
   const values = [
-    calls.map(({ target, method, args, returnTypes }) => [
+    calls.map(({ target, method, args }) => [
       target,
-      keccak256(method).substr(0, 10) +
+      keccak256(toUtf8Bytes(method)).substr(0, 10) +
         (args && args.length > 0
-          ? strip0x(encodeParameters(args.map(a => a[1]), args.map(a => a[0])))
-          : '')
-    ])
+          ? strip0x(
+              encodeParameters(
+                args.map((a) => a[1]),
+                args.map((a) => a[0])
+              )
+            )
+          : ''),
+    ]),
   ];
   const calldata = encodeParameters(
     [
       {
         components: [{ type: 'address' }, { type: 'bytes' }],
         name: 'data',
-        type: 'tuple[]'
-      }
+        type: 'tuple[]',
+      },
     ],
     values
   );
@@ -50,8 +55,8 @@ export default async function aggregate(calls, config) {
     const [method, ...argValues] = call;
     const [argTypesString, returnTypesString] = method
       .match(INSIDE_EVERY_PARENTHESES)
-      .map(match => match.slice(1, -1));
-    const argTypes = argTypesString.split(',').filter(e => !!e);
+      .map((match) => match.slice(1, -1));
+    const argTypes = argTypesString.split(',').filter((e) => !!e);
     invariant(
       argTypes.length === argValues.length,
       `Every method argument must have exactly one type.
@@ -66,7 +71,7 @@ export default async function aggregate(calls, config) {
       args,
       returnTypes,
       target,
-      returns
+      returns,
     };
   });
 
@@ -110,3 +115,129 @@ export default async function aggregate(calls, config) {
 
   return { results: retObj, keyToArgMap };
 }
+
+export async function aggregateDecodedFromABI(calls, config) {
+  calls = Array.isArray(calls) ? calls : [calls];
+
+  const interfacesByContractAddress = Object.fromEntries(
+    calls.map(({ abi, target }) => [target, new Interface(abi)])
+  );
+
+  calls = calls.map(({ call, target }) => {
+    const contractInterface = interfacesByContractAddress[target];
+    if (!target) target = config.multicallAddress;
+    const [method, ...argValues] = call;
+
+    const argTypes = contractInterface.getFunction(method).inputs.map((i) => i.type);
+
+    invariant(
+      argTypes.length === argValues.length,
+      `Every method argument must have exactly one type.
+          Comparing argument types ${JSON.stringify(argTypes)}
+          to argument values ${JSON.stringify(argValues)}.
+        `
+    );
+    const args = argValues.map((argValue, idx) => [argValue, argTypes[idx]]);
+    return {
+      method: `${method}(${argTypes.join(',')})`,
+      args,
+      target,
+    };
+  });
+
+  const callDataBytes = makeMulticallData(calls, false);
+  const outerResults = await ethCall(callDataBytes, config);
+
+  const decoded = MULTICALL_ABI.decodeFunctionResult('aggregate', outerResults)[1];
+
+  return decoded.map((result, i) =>
+    interfacesByContractAddress[calls[i].target].decodeFunctionResult(calls[i].method, result)
+  );
+}
+
+const MULTICALL_ABI = new Interface([
+  {
+    constant: true,
+    inputs: [],
+    name: 'getCurrentBlockTimestamp',
+    outputs: [{ name: 'timestamp', type: 'uint256' }],
+    payable: false,
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    constant: false,
+    inputs: [
+      {
+        components: [
+          { name: 'target', type: 'address' },
+          { name: 'callData', type: 'bytes' },
+        ],
+        name: 'calls',
+        type: 'tuple[]',
+      },
+    ],
+    name: 'aggregate',
+    outputs: [
+      { name: 'blockNumber', type: 'uint256' },
+      { name: 'returnData', type: 'bytes[]' },
+    ],
+    payable: false,
+    stateMutability: 'nonpayable',
+    type: 'function',
+  },
+  {
+    constant: true,
+    inputs: [],
+    name: 'getLastBlockHash',
+    outputs: [{ name: 'blockHash', type: 'bytes32' }],
+    payable: false,
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    constant: true,
+    inputs: [{ name: 'addr', type: 'address' }],
+    name: 'getEthBalance',
+    outputs: [{ name: 'balance', type: 'uint256' }],
+    payable: false,
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    constant: true,
+    inputs: [],
+    name: 'getCurrentBlockDifficulty',
+    outputs: [{ name: 'difficulty', type: 'uint256' }],
+    payable: false,
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    constant: true,
+    inputs: [],
+    name: 'getCurrentBlockGasLimit',
+    outputs: [{ name: 'gaslimit', type: 'uint256' }],
+    payable: false,
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    constant: true,
+    inputs: [],
+    name: 'getCurrentBlockCoinbase',
+    outputs: [{ name: 'coinbase', type: 'address' }],
+    payable: false,
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    constant: true,
+    inputs: [{ name: 'blockNumber', type: 'uint256' }],
+    name: 'getBlockHash',
+    outputs: [{ name: 'blockHash', type: 'bytes32' }],
+    payable: false,
+    stateMutability: 'view',
+    type: 'function',
+  },
+]);
