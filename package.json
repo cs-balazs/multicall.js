@@ -31,6 +31,7 @@
     "README.md"
   ],
   "scripts": {
+    "install": "npm run build",
     "clean": "rimraf dist",
     "build": "rollup -c",
     "watch": "rollup -w -c",
